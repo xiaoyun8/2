@@ -159,10 +159,10 @@ const CHARS: &[char] = &[
 pub const RENDEZVOUS_SERVERS: &[&str] = &["xiaozhu666.cn"];
 pub const RS_PUB_KEY: &str = "pD02nFr7G1WhLM60Np0Fm8ntQ6UTOrv3sW0YyHYlRlg=";
 
-pub const RENDEZVOUS_PORT: i32 = 21116;
-pub const RELAY_PORT: i32 = 21117;
-pub const WS_RENDEZVOUS_PORT: i32 = 21118;
-pub const WS_RELAY_PORT: i32 = 21119;
+pub const RENDEZVOUS_PORT: i32 = 22116;
+pub const RELAY_PORT: i32 = 22117;
+pub const WS_RENDEZVOUS_PORT: i32 = 22118;
+pub const WS_RELAY_PORT: i32 = 22119;
 
 #[inline]
 pub fn is_service_ipc_postfix(postfix: &str) -> bool {
