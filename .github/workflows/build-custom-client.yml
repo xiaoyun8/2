@@ -1,0 +1,215 @@
+# RustDesk Windows 定制客户端自动编译
+# 放到 .github/workflows/ 目录下，push 或手动触发
+
+name: Build RustDesk Custom Client (Windows)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - '.github/workflows/build-custom-client.yml'
+
+env:
+  # ======== 你的自建服务器参数（如需修改，直接改这里）========
+  RUSTDESK_ID_SERVER: "xiaozhu666.cn:22116"
+  RUSTDESK_RELAY_SERVER: "xiaozhu666.cn:22117"
+  RUSTDESK_API_SERVER: "http://xiaozhu666.cn:22114"
+  RUSTDESK_KEY: "pD02nFr7G1WhLM60Np0Fm8ntQ6UTOrv3sW0YyHYlRlg="
+  # ======================================================
+  FLUTTER_VERSION: "3.22.3"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout rustdesk source
+        uses: actions/checkout@v4
+        with:
+          repository: rustdesk/rustdesk
+          path: rustdesk
+
+      # ---------- 安装编译依赖 ----------
+      - name: Install NASM
+        run: choco install nasm -y --no-progress
+
+      - name: Install LLVM
+        run: choco install llvm -y --no-progress --version=18.1.8
+
+      - name: Install Rust (MSVC)
+        run: |
+          rustup default stable-msvc
+          rustup update
+          rustup target add x86_64-pc-windows-msvc
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: C:/vcpkg/installed
+          key: vcpkg-${{ hashFiles('.github/workflows/build-custom-client.yml') }}
+
+      - name: Setup vcpkg
+        run: |
+          if (-not (Test-Path C:/vcpkg)) {
+            git clone https://github.com/microsoft/vcpkg.git C:/vcpkg
+            .\C:\vcpkg\bootstrap-vcpkg.bat
+          }
+          $env:VCPKG_ROOT = "C:/vcpkg"
+          echo "VCPKG_ROOT=C:/vcpkg" >> $env:GITHUB_ENV
+          vcpkg install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static ffmpeg:x64-windows-static
+
+      - name: Cache Flutter
+        uses: actions/cache@v4
+        with:
+          path: C:/flutter
+          key: flutter-${{ env.FLUTTER_VERSION }}
+
+      - name: Install Flutter
+        run: |
+          if (-not (Test-Path C:/flutter)) {
+            $url = "https://storage.googleapis.com/flutter_infra_release/releases/stable/windows/flutter_windows_$env:FLUTTER_VERSION-stable.zip"
+            Invoke-WebRequest -Uri $url -OutFile C:/flutter.zip
+            Expand-Archive C:/flutter.zip -DestinationPath C:/
+            Remove-Item C:/flutter.zip
+          }
+          echo "C:/flutter/bin" >> $env:GITHUB_PATH
+          flutter config --no-analytics
+          flutter doctor
+
+      # ---------- 硬编码自建服务器配置 ----------
+      - name: Patch custom server config
+        working-directory: rustdesk
+        run: |
+          # 方法1: 修改 libs/hbb_common/src/config.rs 中默认服务器
+          $config_file = "libs/hbb_common/src/config.rs"
+          if (Test-Path $config_file) {
+            Write-Host "Patching $config_file ..."
+            $content = Get-Content $config_file -Raw
+
+            # 替换默认 ID 服务器
+            $content = $content -replace 'rs-ny\.rustdesk\.com', '${{ env.RUSTDESK_ID_SERVER }}'
+            $content = $content -replace 'rs-sg\.rustdesk\.com', '${{ env.RUSTDESK_ID_SERVER }}'
+            $content = $content -replace 'rs-cn\.rustdesk\.com', '${{ env.RUSTDESK_ID_SERVER }}'
+
+            # 替换公钥
+            $content = $content -replace 'OeVuKk5nlHiXp\+APMuxD8VhD\.\.\.\..*?"', '${{ env.RUSTDESK_KEY }}"'
+            $content = $content -replace 'PU9lVnVLazVubEhpWHArQVBNdXhEOFZoRE\.\.\..*?"', '${{ env.RUSTDESK_KEY }}"'
+
+            Set-Content $config_file $content -NoNewline
+            Write-Host "config.rs patched."
+          } else {
+            Write-Host "WARNING: $config_file not found, skipping source patch."
+          }
+
+          # 方法2: 设置环境变量（优先级更高，如果 RustDesk 支持）
+          echo "RENDEZVOUS_SERVER=${{ env.RUSTDESK_ID_SERVER }}" >> $env:GITHUB_ENV
+          echo "RS_PUB_KEY=${{ env.RUSTDESK_KEY }}" >> $env:GITHUB_ENV
+          echo "API_SERVER=${{ env.RUSTDESK_API_SERVER }}" >> $env:GITHUB_ENV
+
+          Write-Host "Custom server config applied."
+
+      # ---------- Flutter 准备 ----------
+      - name: Flutter pub get
+        working-directory: rustdesk/flutter
+        run: flutter pub get
+
+      - name: Generate flutter_rust_bridge files
+        working-directory: rustdesk
+        run: |
+          dart pub global activate ffigen --version 5.0.1
+          cargo install flutter_rust_bridge_codegen --version 1.80.1
+          flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs --dart-output ./flutter/lib/generated_bridge.dart
+
+      # ---------- 应用 build.rs 补丁（来自 Dong733 指南）----------
+      - name: Apply build.rs Windows fixes
+        working-directory: rustdesk
+        run: |
+          $build_rs = "build.rs"
+          if (Test-Path $build_rs) {
+            $content = Get-Content $build_rs -Raw
+
+            # 获取 Windows Kits 路径
+            $win_kits = "C:/Program Files (x86)/Windows Kits/10/Lib"
+            $kit_ver = Get-ChildItem $win_kits -Directory | Sort-Object Name -Descending | Select-Object -First 1
+            $kit_path = "$win_kits/$($kit_ver.Name)/um/x64"
+            Write-Host "Windows SDK path: $kit_path"
+
+            # 获取 vcpkg 路径
+            $vcpkg_lib = "C:/vcpkg/installed/x64-windows-static/lib"
+
+            # 在 build_windows 函数中添加链接路径
+            $patch = @"
+
+        // Custom: link SDK + vcpkg libs to fix LNK1120
+        println!("cargo:rustc-link-search=native=$kit_path");
+        println!("cargo:rustc-link-lib=mfplat");
+        println!("cargo:rustc-link-lib=mf");
+        println!("cargo:rustc-link-lib=mfreadwrite");
+        println!("cargo:rustc-link-lib=mfuuid");
+        println!("cargo:rustc-link-lib=uuid");
+        println!("cargo:rustc-link-lib=strmiids");
+        println!("cargo:rustc-link-search=native=$vcpkg_lib");
+        println!("cargo:rustc-link-lib=swresample");
+"@
+
+            # 在 #[cfg(windows)] fn build_windows() 函数体内的最后添加
+            if ($content -match "(?s)(fn build_windows\(\).*?\n\})") {
+              $old_func = $matches[1]
+              $new_func = $old_func -replace '\n\}', "$patch`n}"
+              $content = $content -replace [regex]::Escape($old_func), $new_func
+              Set-Content $build_rs $content -NoNewline
+              Write-Host "build.rs patched."
+            }
+          }
+
+      # ---------- 编译 ----------
+      - name: Build RustDesk (Windows)
+        working-directory: rustdesk
+        run: |
+          python build.py --flutter --hwcodec --vram --portable
+
+      # ---------- 打包上传 ----------
+      - name: Collect build artifacts
+        run: |
+          $version = Get-Date -Format "yyyyMMdd-HHmm"
+          $output = "rustdesk-custom-x64-windows-$version"
+          New-Item -ItemType Directory -Path $output -Force
+
+          # 复制主程序
+          $exe = Get-ChildItem -Path rustdesk/target/release/rustdesk.exe -ErrorAction SilentlyContinue
+          if ($exe) {
+            Copy-Item $exe.FullName "$output/"
+          }
+
+          # 复制 Flutter 打包目录
+          $flutter_dir = "rustdesk/flutter/build/windows/x64/runner/Release"
+          if (Test-Path $flutter_dir) {
+            Copy-Item "$flutter_dir/*" "$output/" -Recurse
+          }
+
+          # 生成配置说明
+          @"
+# RustDesk 自建服务器客户端
+# 服务器: ${{ env.RUSTDESK_ID_SERVER }}
+# 编译时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm')
+
+使用方法:
+1. 双击 rustdesk.exe 运行
+2. 如未自动配置，点击菜单 → 网络 → 解锁后手动填入：
+   ID 服务器: ${{ env.RUSTDESK_ID_SERVER }}
+   中继服务器: ${{ env.RUSTDESK_RELAY_SERVER }}
+   API 服务器: ${{ env.RUSTDESK_API_SERVER }}
+   Key: ${{ env.RUSTDESK_KEY }}
+"@ | Out-File -FilePath "$output/README.txt" -Encoding UTF8
+
+          # 打包
+          Compress-Archive -Path "$output/*" -DestinationPath "$output.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustdesk-windows-custom
+          path: rustdesk-custom-x64-windows-*.zip
+          retention-days: 30
