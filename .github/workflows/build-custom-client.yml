@@ -139,22 +139,22 @@ jobs:
             # 获取 vcpkg 路径
             $vcpkg_lib = "C:/vcpkg/installed/x64-windows-static/lib"
 
-            # 在 build_windows 函数中添加链接路径
-            $patch = @"
+            # 需要插入的链接行
+            $patch_lines = @(
+              "        // Custom: link SDK + vcpkg libs to fix LNK1120",
+              "        println!(`"cargo:rustc-link-search=native=$kit_path`");",
+              "        println!(`"cargo:rustc-link-lib=mfplat`");",
+              "        println!(`"cargo:rustc-link-lib=mf`");",
+              "        println!(`"cargo:rustc-link-lib=mfreadwrite`");",
+              "        println!(`"cargo:rustc-link-lib=mfuuid`");",
+              "        println!(`"cargo:rustc-link-lib=uuid`");",
+              "        println!(`"cargo:rustc-link-lib=strmiids`");",
+              "        println!(`"cargo:rustc-link-search=native=$vcpkg_lib`");",
+              "        println!(`"cargo:rustc-link-lib=swresample`");"
+            )
+            $patch = ($patch_lines -join "`n") + "`n"
 
-        // Custom: link SDK + vcpkg libs to fix LNK1120
-        println!("cargo:rustc-link-search=native=$kit_path");
-        println!("cargo:rustc-link-lib=mfplat");
-        println!("cargo:rustc-link-lib=mf");
-        println!("cargo:rustc-link-lib=mfreadwrite");
-        println!("cargo:rustc-link-lib=mfuuid");
-        println!("cargo:rustc-link-lib=uuid");
-        println!("cargo:rustc-link-lib=strmiids");
-        println!("cargo:rustc-link-search=native=$vcpkg_lib");
-        println!("cargo:rustc-link-lib=swresample");
-"@
-
-            # 在 #[cfg(windows)] fn build_windows() 函数体内的最后添加
+            # 在 build_windows 函数体内的最后添加
             if ($content -match "(?s)(fn build_windows\(\).*?\n\})") {
               $old_func = $matches[1]
               $new_func = $old_func -replace '\n\}', "$patch`n}"
@@ -190,19 +190,20 @@ jobs:
           }
 
           # 生成配置说明
-          @"
-# RustDesk 自建服务器客户端
-# 服务器: ${{ env.RUSTDESK_ID_SERVER }}
-# 编译时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm')
-
-使用方法:
-1. 双击 rustdesk.exe 运行
-2. 如未自动配置，点击菜单 → 网络 → 解锁后手动填入：
-   ID 服务器: ${{ env.RUSTDESK_ID_SERVER }}
-   中继服务器: ${{ env.RUSTDESK_RELAY_SERVER }}
-   API 服务器: ${{ env.RUSTDESK_API_SERVER }}
-   Key: ${{ env.RUSTDESK_KEY }}
-"@ | Out-File -FilePath "$output/README.txt" -Encoding UTF8
+          $readme = @(
+            "# RustDesk 自建服务器客户端",
+            "# 服务器: ${{ env.RUSTDESK_ID_SERVER }}",
+            "# 编译时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm')",
+            "",
+            "使用方法:",
+            "1. 双击 rustdesk.exe 运行",
+            "2. 如未自动配置，点击菜单 - 网络 - 解锁后手动填入：",
+            "   ID 服务器: ${{ env.RUSTDESK_ID_SERVER }}",
+            "   中继服务器: ${{ env.RUSTDESK_RELAY_SERVER }}",
+            "   API 服务器: ${{ env.RUSTDESK_API_SERVER }}",
+            "   Key: ${{ env.RUSTDESK_KEY }}"
+          )
+          $readme -join [System.Environment]::NewLine | Out-File -FilePath "$output/README.txt" -Encoding UTF8
 
           # 打包
           Compress-Archive -Path "$output/*" -DestinationPath "$output.zip"
